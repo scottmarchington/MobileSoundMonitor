@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live dBA &amp; dBC Sound Level Monitor</title>
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent-a: #38bdf8;
+      --accent-c: #f472b6;
+      --accent-peak: #fbbf24;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { width: 100%; max-width: 960px; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    h1 { margin: 0; font-size: 1.4rem; }
+    .status-badge {
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .metric-label { color: var(--muted); font-size: 0.9rem; margin-bottom: 6px; }
+    .metric-value { font-size: 2.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .dba { color: var(--accent-a); }
+    .dbc { color: var(--accent-c); }
+    .peak { color: var(--accent-peak); }
+    .chart-box { height: 340px; position: relative; }
+    .publisher-panel {
+      margin-top: 20px;
+      border-top: 1px solid var(--border);
+      padding-top: 20px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 12px;
+    }
+    input, button {
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    button {
+      background: #2563eb;
+      border-color: #2563eb;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    button.danger { background: #dc2626; border-color: #dc2626; }
+    button.secondary { background: var(--card); border-color: var(--border); }
+    .hidden { display: none; }
+    .cal-row {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Sound Level Monitor (dBA / dBC)</h1>
+      <div id="connection-status" class="status-badge">Connecting to feed...</div>
+    </header>
+
+    <!-- Live Readout Cards -->
+    <div class="grid">
+      <div class="card">
+        <div class="metric-label">A-Weighted (dBA Leq)</div>
+        <div id="dba-val" class="metric-value dba">--.-</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">C-Weighted (dBC Leq)</div>
+        <div id="dbc-val" class="metric-value dbc">--.-</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">Window Peak (dBC)</div>
+        <div id="peak-val" class="metric-value peak">--.-</div>
+      </div>
+    </div>
+
+    <!-- Historical & Live Chart -->
+    <div class="card">
+      <div class="chart-box">
+        <canvas id="splChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Publisher Controls (For Your Desktop Only) -->
+    <div class="card publisher-panel">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <strong>Desktop Broadcaster Controls</strong>
+        <button id="toggle-login-btn" class="secondary" type="button">Broadcaster Login</button>
+      </div>
+
+      <!-- Login Form -->
+      <form id="login-form" class="controls hidden">
+        <input type="email" id="email" placeholder="Supabase Admin Email" required />
+        <input type="password" id="password" placeholder="Password" required />
+        <button type="submit">Sign In</button>
+      </form>
+
+      <!-- Active Microphone & Broadcast Controls -->
+      <div id="broadcast-controls" class="hidden">
+        <div class="controls">
+          <button id="start-mic-btn" type="button">Start Microphone &amp; Broadcast</button>
+          <button id="stop-mic-btn" class="danger hidden" type="button">Stop Broadcast</button>
+          <span id="pub-status" style="color: var(--muted); font-size: 0.9rem;">Ready</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-offset">Calibration Offset (dB):</label>
+          <input type="range" id="cal-offset" min="60" max="130" step="0.5" value="94" />
+          <span id="cal-display">94.0 dB</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ==========================================
+    // 1. SUPABASE CONFIGURATION (REPLACE THESE)
+    // ==========================================
+    const SUPABASE_URL = 'https://bnfzixccwelpwasfviiv.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJuZnppeGNjd2VscHdhc2Z2aWl2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTUyMDk4OTAsImV4cCI6MjExMDc4NTg5MH0.Ig3Wd5QoqG57-s8NFiFwZ6VDXxtVdYZQIERYXFDHe40';
+
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // ==========================================
+    // 2. CHART SETUP (CHART.JS)
+    // ==========================================
+    const MAX_POINTS = 150;
+    const ctx = document.getElementById('splChart').getContext('2d');
+    const splChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'dBA',
+            data: [],
+            borderColor: '#38bdf8',
+            backgroundColor: 'rgba(56, 189, 248, 0.1)',
+            borderWidth: 2,
+            tension: 0.25,
+            pointRadius: 0
+          },
+          {
+            label: 'dBC',
+            data: [],
+            borderColor: '#f472b6',
+            backgroundColor: 'rgba(244, 114, 182, 0.1)',
+            borderWidth: 2,
+            tension: 0.25,
+            pointRadius: 0
+          },
+          {
+            label: 'Peak dBC',
+            data: [],
+            borderColor: '#fbbf24',
+            borderWidth: 1,
+            borderDash: [5,5],
+            tension: 0.1,
+            pointRadius: 0
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: {
+            ticks: { color: '#94a3b8', maxTicksLimit: 8 },
+            grid: { color: '#1e293b' }
+          },
+          y: {
+            min: 20,
+            max: 120,
+            ticks: { color: '#94a3b8' },
+            grid: { color: '#334155' },
+            title: { display: true, text: 'dB SPL', color: '#94a3b8' }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#f8fafc' } }
+        }
+      }
+    });
+
+    function formatTime(isoString) {
+      const d = new Date(isoString);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function updateDisplayAndChart(row) {
+      document.getElementById('dba-val').textContent = row.dba.toFixed(1);
+      document.getElementById('dbc-val').textContent = row.dbc.toFixed(1);
+      document.getElementById('peak-val').textContent = (row.peak_dbc ?? row.dbc).toFixed(1);
+
+      splChart.data.labels.push(formatTime(row.created_at));
+      splChart.data.datasets[0].data.push(row.dba);
+      splChart.data.datasets[1].data.push(row.dbc);
+      splChart.data.datasets[2].data.push(row.peak_dbc ?? row.dbc);
+
+      if (splChart.data.labels.length > MAX_POINTS) {
+        splChart.data.labels.shift();
+        splChart.data.datasets.forEach(ds => ds.data.shift());
+      }
+      splChart.update();
+    }
+
+    // ==========================================
+    // 3. PUBLIC VIEWER: LOAD HISTORY & REALTIME
+    // ==========================================
+    async function initViewer() {
+      const statusEl = document.getElementById('connection-status');
+
+      const { data, error } = await db
+        .from('readings')
+        .select('created_at, dba, dbc, peak_dbc')
+        .order('created_at', { ascending: false })
+        .limit(MAX_POINTS);
+
+      if (error) {
+        statusEl.textContent = 'Database Error: ' + error.message;
+        return;
+      }
+
+      if (data && data.length > 0) {
+        data.reverse().forEach(updateDisplayAndChart);
+      }
+
+      db.channel('public:readings')
+        .on(
+          'postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'readings' },
+          (payload) => updateDisplayAndChart(payload.new)
+        )
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            statusEl.textContent = '● Live Feed Connected';
+            statusEl.style.color = '#4ade80';
+          }
+        });
+    }
+
+    initViewer();
+// ==========================================
+    // 4. AUTHENTICATION UI
+    // ==========================================
+    const toggleLoginBtn = document.getElementById('toggle-login-btn');
+    const loginForm = document.getElementById('login-form');
+    const broadcastControls = document.getElementById('broadcast-controls');
+
+    toggleLoginBtn.addEventListener('click', () => {
+      loginForm.classList.toggle('hidden');
+    });
+
+    db.auth.onAuthStateChange((_event, session) => {
+      if (session) {
+        loginForm.classList.add('hidden');
+        toggleLoginBtn.classList.add('hidden');
+        broadcastControls.classList.remove('hidden');
+      }
+    });
+
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const { error } = await db.auth.signInWithPassword({ email, password });
+      if (error) {
+        alert('Login failed: ' + error.message);
+      }
+    });
+
+    // ==========================================
+    // 5. WEB AUDIO API (A & C WEIGHTING + PUBLISH)
+    // ==========================================
+    let audioCtx = null;
+    let micStream = null;
+    let rafId = null;
+    let publishTimer = null;
+    let wakeLock = null;
+
+    // Calibration slider
+    let calibrationOffset = Number(localStorage.getItem('spl_cal_offset') || 94);
+    const calSlider = document.getElementById('cal-offset');
+    const calDisplay = document.getElementById('cal-display');
+    calSlider.value = calibrationOffset;
+    calDisplay.textContent = `${calibrationOffset.toFixed(1)} dB`;
+
+    calSlider.addEventListener('input', (e) => {
+      calibrationOffset = Number(e.target.value);
+      calDisplay.textContent = `${calibrationOffset.toFixed(1)} dB`;
+      localStorage.setItem('spl_cal_offset', calibrationOffset);
+    });
+
+    /**
+     * Builds an IEC 61672-1 A-weighting filter chain using Web Audio BiquadFilterNodes
+     */
+    function createAWeightingChain(ctx) {
+      const hp1 = ctx.createBiquadFilter();
+      hp1.type = 'highpass';
+      hp1.frequency.value = 20.6;
+      hp1.Q.value = 0.707;
+
+      const hp2 = ctx.createBiquadFilter();
+      hp2.type = 'highpass';
+      hp2.frequency.value = 20.6;
+      hp2.Q.value = 0.707;
+
+      const hp3 = ctx.createBiquadFilter();
+      hp3.type = 'highpass';
+      hp3.frequency.value = 107.7;
+      hp3.Q.value = 0.707;
+
+      const hp4 = ctx.createBiquadFilter();
+      hp4.type = 'highpass';
+      hp4.frequency.value = 737.9;
+      hp4.Q.value = 0.707;
+
+      const lp1 = ctx.createBiquadFilter();
+      lp1.type = 'lowpass';
+      lp1.frequency.value = 12194;
+      lp1.Q.value = 0.707;
+
+      const lp2 = ctx.createBiquadFilter();
+      lp2.type = 'lowpass';
+      lp2.frequency.value = 12194;
+      lp2.Q.value = 0.707;
+
+      // Normalize 1 kHz gain (+2.0 dB compensation for filter cascade roll-off)
+      const gain = ctx.createGain();
+      gain.gain.value = Math.pow(10, 2.0 / 20);
+
+      hp1.connect(hp2);
+      hp2.connect(hp3);
+      hp3.connect(hp4);
+      hp4.connect(lp1);
+      lp1.connect(lp2);
+      lp2.connect(gain);
+
+      return { input: hp1, output: gain };
+    }
+
+    /**
+     * Builds an IEC 61672-1 C-weighting filter chain
+     */
+    function createCWeightingChain(ctx) {
+      const hp1 = ctx.createBiquadFilter();
+      hp1.type = 'highpass';
+      hp1.frequency.value = 20.6;
+      hp1.Q.value = 0.707;
+
+      const hp2 = ctx.createBiquadFilter();
+      hp2.type = 'highpass';
+      hp2.frequency.value = 20.6;
+      hp2.Q.value = 0.707;
+
+      const lp1 = ctx.createBiquadFilter();
+      lp1.type = 'lowpass';
+      lp1.frequency.value = 12194;
+      lp1.Q.value = 0.707;
+
+      const lp2 = ctx.createBiquadFilter();
+      lp2.type = 'lowpass';
+      lp2.frequency.value = 12194;
+      lp2.Q.value = 0.707;
+
+      const gain = ctx.createGain();
+      gain.gain.value = Math.pow(10, 0.06 / 20);
+
+      hp1.connect(hp2);
+      hp2.connect(lp1);
+      lp1.connect(lp2);
+      lp2.connect(gain);
+
+      return { input: hp1, output: gain };
+    }
+
+    function computeDb(analyser, buffer) {
+      analyser.getFloatTimeDomainData(buffer);
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        sum += buffer[i] * buffer[i];
+      }
+      const rms = Math.sqrt(sum / buffer.length);
+      const dbfs = 20 * Math.log10(Math.max(rms, 1e-7));
+      return dbfs + calibrationOffset;
+    }
+
+    document.getElementById('start-mic-btn').addEventListener('click', async () => {
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          }
+        });
+
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen').catch(() => null);
+        }
+
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(micStream);
+
+        const aChain = createAWeightingChain(audioCtx);
+        const cChain = createCWeightingChain(audioCtx);
+
+        const analyserA = audioCtx.createAnalyser();
+        const analyserC = audioCtx.createAnalyser();
+        analyserA.fftSize = 2048;
+        analyserC.fftSize = 2048;
+
+        source.connect(aChain.input);
+        aChain.output.connect(analyserA);
+
+        source.connect(cChain.input);
+        cChain.output.connect(analyserC);
+
+        const bufferA = new Float32Array(analyserA.fftSize);
+        const bufferC = new Float32Array(analyserC.fftSize);
+
+        // Energy accumulators for 2-second Leq batches
+        let energySumA = 0;
+        let energySumC = 0;
+        let sampleCount = 0;
+        let maxPeakC = -Infinity;
+
+        function measureLoop() {
+          const dba = computeDb(analyserA, bufferA);
+          const dbc = computeDb(analyserC, bufferC);
+
+          energySumA += Math.pow(10, dba / 10);
+          energySumC += Math.pow(10, dbc / 10);
+          sampleCount++;
+
+          if (dbc > maxPeakC) {
+            maxPeakC = dbc;
+          }
+
+          rafId = requestAnimationFrame(measureLoop);
+        }
+
+        measureLoop();
+
+        // Publish every 2 seconds to Supabase
+        publishTimer = setInterval(async () => {
+          if (sampleCount === 0) return;
+
+          const avgDba = Number((10 * Math.log10(energySumA / sampleCount)).toFixed(1));
+          const avgDbc = Number((10 * Math.log10(energySumC / sampleCount)).toFixed(1));
+          const peakDbc = Number(maxPeakC.toFixed(1));
+
+          energySumA = 0;
+          energySumC = 0;
+          sampleCount = 0;
+          maxPeakC = -Infinity;
+
+          const { error } = await db.from('readings').insert({
+            dba: avgDba,
+            dbc: avgDbc,
+            peak_dbc: peakDbc
+          });
+
+          const pubStatus = document.getElementById('pub-status');
+          if (error) {
+            pubStatus.textContent = 'Insert Error: ' + error.message;
+            pubStatus.style.color = '#f87171';
+          } else {
+            pubStatus.textContent = `Broadcasting live (Last: ${avgDba} dBA / ${avgDbc} dBC)`;
+            pubStatus.style.color = '#4ade80';
+          }
+        }, 2000);
+
+        document.getElementById('start-mic-btn').classList.add('hidden');
+        document.getElementById('stop-mic-btn').classList.remove('hidden');
+      } catch (err) {
+        alert('Microphone access error: ' + err.message);
+      }
+    });
+
+    document.getElementById('stop-mic-btn').addEventListener('click', () => {
+      cancelAnimationFrame(rafId);
+      clearInterval(publishTimer);
+      micStream?.getTracks().forEach((t) => t.stop());
+      audioCtx?.close();
+      wakeLock?.release();
+
+      document.getElementById('start-mic-btn').classList.remove('hidden');
+      document.getElementById('stop-mic-btn').classList.add('hidden');
+      document.getElementById('pub-status').textContent = 'Stopped';
+      document.getElementById('pub-status').style.color = '#94a3b8';
+    });
+    </script>
+  </body>
+</html>
