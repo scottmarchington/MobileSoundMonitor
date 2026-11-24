@@ -125,11 +125,43 @@
       </div>
     </div>
 
+    <!-- View & Rollup Controls -->
+    <div class="card" style="margin-bottom: 16px;">
+      <div class="controls" style="margin-top: 0; justify-content: space-between;">
+        <div class="controls" style="margin-top: 0;">
+          <button id="mode-live-btn" type="button">Live (2s)</button>
+          <button id="mode-1m-btn" class="secondary" type="button">1m Rollup</button>
+          <button id="mode-5m-btn" class="secondary" type="button">5m Rollup</button>
+        </div>
+        <div class="controls" style="margin-top: 0;">
+          <label for="lookback-select" style="color: var(--muted); font-size: 0.9rem;">Window:</label>
+          <select id="lookback-select">
+            <option value="1 hour">Last 1h</option>
+            <option value="6 hours">Last 6h</option>
+            <option value="24 hours" selected>Last 24h</option>
+            <option value="7 days">Last 7d</option>
+          </select>
+          <button id="refresh-view-btn" class="secondary" type="button">Refresh</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Historical & Live Chart -->
     <div class="card">
       <div class="chart-box">
         <canvas id="splChart"></canvas>
       </div>
+    </div>
+
+    <!-- Cycle & Level-Change Highlights -->
+    <div class="card" style="margin-top: 16px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap: 10px; flex-wrap: wrap;">
+        <strong>Cycle &amp; Level-Change Log (dBC)</strong>
+        <span id="events-summary" style="color: var(--muted); font-size: 0.85rem;">Waiting for data...</span>
+      </div>
+      <ul id="events-list" style="list-style: none; padding: 0; margin: 12px 0 0 0; color: var(--muted); font-size: 0.9rem;">
+        <li>No significant dBC level changes detected yet.</li>
+      </ul>
     </div>
 
     <!-- Publisher Controls (For Your Desktop Only) -->
@@ -245,20 +277,24 @@
     }
 
     function updateDisplayAndChart(row) {
+      // Update cards with live data
       document.getElementById('dba-val').textContent = row.dba.toFixed(1);
       document.getElementById('dbc-val').textContent = row.dbc.toFixed(1);
       document.getElementById('peak-val').textContent = (row.peak_dbc ?? row.dbc).toFixed(1);
 
-      splChart.data.labels.push(formatTime(row.created_at));
-      splChart.data.datasets[0].data.push(row.dba);
-      splChart.data.datasets[1].data.push(row.dbc);
-      splChart.data.datasets[2].data.push(row.peak_dbc ?? row.dbc);
+      // If displaying live view, render live chart
+      if (viewMode === 'live') {
+        splChart.data.labels.push(formatTime(row.created_at));
+        splChart.data.datasets[0].data.push(row.dba);
+        splChart.data.datasets[1].data.push(row.dbc);
+        splChart.data.datasets[2].data.push(row.peak_dbc ?? row.dbc);
 
-      if (splChart.data.labels.length > MAX_POINTS) {
-        splChart.data.labels.shift();
-        splChart.data.datasets.forEach(ds => ds.data.shift());
+        if (splChart.data.labels.length > MAX_POINTS) {
+          splChart.data.labels.shift();
+          splChart.data.datasets.forEach(ds => ds.data.shift());
+        }
+        splChart.update();
       }
-      splChart.update();
     }
 
     // ==========================================
@@ -617,6 +653,193 @@ function createAWeightingChain(ctx) {
       document.getElementById('pub-status').textContent = 'Stopped';
       document.getElementById('pub-status').style.color = '#94a3b8';
     });
+
+    // ==========================================
+    // Display modes
+    // ==========================================
+    let viewMode = 'live'; // 'live' | '1m' | '5m'
+    let currentPoints = []; // normalized { ts, dba, dbc, peak }
+
+    function setActiveModeButtons() {
+      const modes = [
+        { id: 'mode-live-btn', mode: 'live' },
+        { id: 'mode-1m-btn', mode: '1m' },
+        { id: 'mode-5m-btn', mode: '5m' }
+      ];
+      for (const m of modes) {
+        const btn = document.getElementById(m.id);
+        if (m.mode === viewMode) {
+          btn.classList.remove('secondary');
+        } else {
+          btn.classList.add('secondary');
+        }
+      }
+    }
+
+    function renderSeriesToChart(points, limitToMax = false) {
+      const sliced = limitToMax && points.length > MAX_POINTS
+        ? points.slice(points.length - MAX_POINTS)
+        : points;
+
+      splChart.data.labels = sliced.map((p) => formatTime(p.ts));
+      splChart.data.datasets[0].data = sliced.map((p) => p.dba);
+      splChart.data.datasets[1].data = sliced.map((p) => p.dbc);
+      splChart.data.datasets[2].data = sliced.map((p) => p.peak);
+      splChart.update();
+
+      if (sliced.length > 0) {
+        const last = sliced[sliced.length - 1];
+        document.getElementById('dba-val').textContent = last.dba.toFixed(1);
+        document.getElementById('dbc-val').textContent = last.dbc.toFixed(1);
+        document.getElementById('peak-val').textContent = last.peak.toFixed(1);
+      }
+    }
+
+    /**
+     * Flags notable dBC step changes (>= 4.0 dB jump or drop) between consecutive buckets.
+     */
+    function detectLevelChanges(points, stepThreshold = 4.0) {
+      const events = [];
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1];
+        const curr = points[i];
+        const delta = Number((curr.dbc - prev.dbc).toFixed(1));
+        if (Math.abs(delta) >= stepThreshold) {
+          events.push({
+            ts: curr.ts,
+            delta,
+            fromDbc: prev.dbc,
+            toDbc: curr.dbc,
+            peakDbc: curr.peak
+          });
+        }
+      }
+      return events;
+    }
+
+    function renderEventsList(events) {
+      const listEl = document.getElementById('events-list');
+      const summaryEl = document.getElementById('events-summary');
+
+      if (!events.length) {
+        summaryEl.textContent = '0 shifts ≥ 4.0 dB';
+        listEl.innerHTML = '<li>No dBC shifts ≥ 4.0 dB in this window.</li>';
+        return;
+      }
+
+      summaryEl.textContent = `${events.length} shift${events.length === 1 ? '' : 's'} ≥ 4.0 dB`;
+      // Show newest first so recent HVAC cycles are right at the top
+      listEl.innerHTML = events
+        .slice()
+        .reverse()
+        .map((ev) => {
+          const sign = ev.delta > 0 ? '+' : '';
+          const dirLabel = ev.delta > 0 ? 'Jump' : 'Drop';
+          const color = ev.delta > 0 ? '#f472b6' : '#38bdf8';
+          return `<li style="padding: 6px 0; border-bottom: 1px solid var(--border);">
+            <span style="color: var(--text); font-weight: 600;">${formatTime(ev.ts)}</span>
+            — <span style="color: ${color}; font-weight: 600;">${dirLabel} ${sign}${ev.delta.toFixed(1)} dBC</span>
+            (${ev.fromDbc.toFixed(1)} → ${ev.toDbc.toFixed(1)} dBC, Peak ${ev.peakDbc.toFixed(1)} dBC)
+          </li>`;
+        })
+        .join('');
+    }
+
+    function sinceIsoFromLookback(lookbackStr) {
+      const now = Date.now();
+      const map = {
+        '1 hour': 1 * 3600 * 1000,
+        '6 hours': 6 * 3600 * 1000,
+        '24 hours': 24 * 3600 * 1000,
+        '7 days': 7 * 24 * 3600 * 1000
+      };
+      return new Date(now - (map[lookbackStr] || 24 * 3600 * 1000)).toISOString();
+    }
+
+    async function loadCurrentView() {
+      const lookback = document.getElementById('lookback-select').value;
+      const sinceIso = sinceIsoFromLookback(lookback);
+
+      if (viewMode === 'live') {
+        const { data, error } = await db
+          .from('readings')
+          .select('created_at, dba, dbc, peak_dbc')
+          .gte('created_at', sinceIso)
+          .order('created_at', { ascending: false })
+          .limit(MAX_POINTS);
+
+        if (error) return;
+        currentPoints = (data || []).reverse().map((r) => ({
+          ts: r.created_at,
+          dba: Number(r.dba),
+          dbc: Number(r.dbc),
+          peak: Number(r.peak_dbc ?? r.dbc)
+        }));
+        renderSeriesToChart(currentPoints, true);
+        renderEventsList(detectLevelChanges(currentPoints));
+        return;
+      }
+
+      const bucketInterval = viewMode === '1m' ? '1 minute' : '5 minutes';
+      const { data, error } = await db.rpc('get_spl_rollups', {
+        p_bucket_interval: bucketInterval,
+        p_since: sinceIso
+      });
+
+      if (error) {
+        document.getElementById('events-summary').textContent = 'Rollup error: ' + error.message;
+        return;
+      }
+
+      currentPoints = (data || []).map((row) => ({
+        ts: row.bucket_start,
+        dba: Number(row.dba_leq),
+        dbc: Number(row.dbc_leq),
+        peak: Number(row.peak_dbc_max ?? row.dbc_leq)
+      }));
+      renderSeriesToChart(currentPoints, false);
+      renderEventsList(detectLevelChanges(currentPoints));
+    }
+
+    document.getElementById('mode-live-btn').addEventListener('click', () => {
+      viewMode = 'live';
+      setActiveModeButtons();
+      loadCurrentView();
+    });
+
+    document.getElementById('mode-1m-btn').addEventListener('click', () => {
+      viewMode = '1m';
+      setActiveModeButtons();
+      loadCurrentView();
+    });
+
+    document.getElementById('mode-5m-btn').addEventListener('click', () => {
+      viewMode = '5m';
+      setActiveModeButtons();
+      loadCurrentView();
+    });
+
+    document.getElementById('mode-live-btn').addEventListener('click', () => {
+      if (viewMode !== 'live') {
+        setActiveModeButtons();
+        loadCurrentView();
+      }
+    });
+
+    document.getElementById('mode-live-btn').addEventListener('click', () => {
+      if (viewMode !== 'live') {
+        setActiveModeButtons();
+        loadCurrentView();
+      }
+    });
+
+    document.getElementById('refresh-view-btn').addEventListener('click', () => {
+      if (viewMode !== 'live') {
+        setActiveModeButtons();
+        loadCurrentView();
+      }
+    });
+
     </script>
   </body>
 </html>
