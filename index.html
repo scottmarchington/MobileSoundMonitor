@@ -158,6 +158,11 @@
           <input type="range" id="cal-offset" min="60" max="130" step="0.5" value="94" />
           <span id="cal-display">94.0 dB</span>
         </div>
+        <div class="cal-row">
+          <label for="dbc-trim">dBC Trim (dB):</label>
+          <input type="range" id="dbc-trim" min="-20" max="20" step="0.5" value="0" />
+          <span id="dbc-trim-display">+0.0 dB</span>
+        </div>
       </div>
     </div>
   </div>
@@ -343,6 +348,19 @@
       localStorage.setItem('spl_cal_offset', calibrationOffset);
     });
 
+    // DBC Trim slider
+    let dbcTrim = Number(localStorage.getItem('spl_dbc_trim') || 0);
+    const dbcTrimSlider = document.getElementById('dbc-trim');
+    const dbcTrimDisplay = document.getElementById('dbc-trim-display');
+    dbcTrimSlider.value = dbcTrim;
+    dbcTrimDisplay.textContent = `${dbcTrim >= 0 ? '+' : ''}${dbcTrim.toFixed(1)} dB`;
+
+    dbcTrimSlider.addEventListener('input', (e) => {
+      dbcTrim = Number(e.target.value);
+      dbcTrimDisplay.textContent = `${dbcTrim >= 0 ? '+' : ''}${dbcTrim.toFixed(1)} dB`;
+      localStorage.setItem('spl_dbc_trim', dbcTrim);
+    });
+
     /**
  * Pre-warped bilinear transform for a 2nd-order s-domain transfer function:
  *   H(s) = (n0*s^2 + n1*s + n2) / (d0*s^2 + d1*s + d2)
@@ -464,15 +482,24 @@ function createAWeightingChain(ctx) {
   return { input: nodeHp1, output: gainNode, nodes: [nodeHp1, nodeMid23, nodeLp4] };
 }
 
-    function computeDb(analyser, buffer) {
-      analyser.getFloatTimeDomainData(buffer);
+    function computeDb(buffer, offset) {
       let sum = 0;
       for (let i = 0; i < buffer.length; i++) {
         sum += buffer[i] * buffer[i];
       }
       const rms = Math.sqrt(sum / buffer.length);
       const dbfs = 20 * Math.log10(Math.max(rms, 1e-7));
-      return dbfs + calibrationOffset;
+      return dbfs + offset;
+    }
+
+    function computeSamplePeakDb(buffer, offset) {
+      let maxAbs = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        const abs = Math.abs(buffer[i]);
+        if (abs > maxAbs) maxAbs = abs;
+      }
+      const dbfs = 20 * Math.log10(Math.max(maxAbs, 1e-7));
+      return dbfs + offset;
     }
 
     document.getElementById('start-mic-btn').addEventListener('click', async () => {
@@ -516,17 +543,27 @@ function createAWeightingChain(ctx) {
         let maxPeakC = -Infinity;
 
         function measureLoop() {
-          const dba = computeDb(analyserA, bufferA);
-          const dbc = computeDb(analyserC, bufferC);
+          // 1. Capture prerequisites
+          analyserA.getFloatTimeDomainData(bufferA);
+          analyserC.getFloatTimeDomainData(bufferC);
+          const dbcOffset = calibrationOffset + dbcTrim;
 
+          // 2. Calculate dB values
+          const dba = computeDb(bufferA, calibrationOffset);
+          const dbc = computeDb(bufferC, dbcOffset);
+          const peakC = computeSamplePeakDb(bufferC, dbcOffset);
+
+          // 3. Sum dB energy of all samples over frame window (ex. 2s) for averaging
           energySumA += Math.pow(10, dba / 10);
           energySumC += Math.pow(10, dbc / 10);
           sampleCount++;
 
-          if (dbc > maxPeakC) {
-            maxPeakC = dbc;
+          // 4. Check for new peak
+          if (peakC > maxPeakC) {
+            maxPeakC = peakC;
           }
 
+          // 5. Request UI update (effectively continuing sample loop)
           rafId = requestAnimationFrame(measureLoop);
         }
 
