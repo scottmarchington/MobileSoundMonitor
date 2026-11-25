@@ -74,7 +74,7 @@
       align-items: center;
       margin-top: 12px;
     }
-    input, button {
+    input, button, select {
       padding: 10px 14px;
       border-radius: 8px;
       border: 1px solid var(--border);
@@ -134,14 +134,24 @@
           <button id="mode-5m-btn" class="secondary" type="button">5m Rollup</button>
         </div>
         <div class="controls" style="margin-top: 0;">
-          <label for="lookback-select" style="color: var(--muted); font-size: 0.9rem;">Window:</label>
+          <label for="lookback-select" style="color: var(--muted); font-size: 0.9rem;">Rollup Window:</label>
           <select id="lookback-select">
-            <option value="1 hour">Last 1h</option>
-            <option value="6 hours">Last 6h</option>
-            <option value="24 hours" selected>Last 24h</option>
-            <option value="7 days">Last 7d</option>
+            <option value="1 hour">1h</option>
+            <option value="3 hours">3h</option>
+            <option value="6 hours" selected>6h</option>
+            <option value="12 hours">12h</option>
+            <option value="24 hours">24h</option>
+            <option value="7 days">7d</option>
           </select>
           <button id="refresh-view-btn" class="secondary" type="button">Refresh</button>
+        </div>
+        <div class="controls" style="margin-top: 10px;">
+          <label for="window-start-input" style="color: var(--muted); font-size: 0.9rem;">Rollup Start:</label>
+          <input type="datetime-local" id="window-start-input" step="60" />
+          <button id="shift-back-6h-btn" class="secondary" type="button">-6h</button>
+          <button id="shift-fwd-6h-btn" class="secondary" type="button">+6h</button>
+          <button id="load-6h-btn" class="secondary" type="button">Load 6h (1m)</button>
+          <span id="window-range-label" style="color: var(--muted); font-size: 0.85rem;"></span>
         </div>
       </div>
     </div>
@@ -322,7 +332,9 @@
         .on(
           'postgres_changes',
           { event: 'INSERT', schema: 'public', table: 'readings' },
-          (payload) => updateDisplayAndChart(payload.new)
+          (payload) => {
+            updateDisplayAndChart(payload.new)
+          }
         )
         .subscribe((status) => {
           if (status === 'SUBSCRIBED') {
@@ -745,15 +757,67 @@ function createAWeightingChain(ctx) {
         .join('');
     }
 
+    function removeQueryParam(key) {
+      const url = new URL(window.location.href);
+
+      if (!url.searchParams.has(key)) {
+        return false;
+      }
+
+      url.searchParams.delete(key);
+      window.history.replaceState({}, "", url);
+      return true;
+    }
+
+    function setQueryParam(key, value) {
+      const url = new URL(window.location.href);
+
+      if (value === null || value === undefined || value === "") {
+        url.searchParams.delete(key);
+      } else {
+        url.searchParams.set(key, String(value));
+      }
+
+      window.history.replaceState({}, "", url);
+    }
+
+    function renderQuerystring() {
+      const params = new URLSearchParams(window.location.search);
+      if (viewMode === 'live') {
+        // remove querystring options that we set
+        removeQueryParam('rollupInterval');
+        removeQueryParam('rollupWindow');
+        removeQueryParam('rollupStart');
+      } else {
+        // set appropriately
+        setQueryParam('rollupInterval', viewMode);
+        setQueryParam('rollupWindow', document.getElementById('lookback-select').selectedOptions[0]?.textContent);
+        function getTimestamp(inputEl) {
+          const ms = new Date(inputEl.value).getTime();
+          return Number.isFinite(ms) ? ms : null;
+        }
+
+        setQueryParam('rollupStart', getTimestamp(document.getElementById('window-start-input')));
+      }
+    }
+
+    function lookbackToMs(lookbackStr) {
+      const hourSpan = 3600000;
+      const map = {
+        '1 hour': 1 * hourSpan,
+        '3 hours': 3 * hourSpan,
+        '6 hours': 6 * hourSpan,
+        '12 hours': 12 * hourSpan,
+        '24 hours': 24 * hourSpan,
+        '7 days': 7 * 24 * hourSpan
+      };
+
+      return map[lookbackStr] || 6 * 3600 * 1000
+    }
+
     function sinceIsoFromLookback(lookbackStr) {
       const now = Date.now();
-      const map = {
-        '1 hour': 1 * 3600 * 1000,
-        '6 hours': 6 * 3600 * 1000,
-        '24 hours': 24 * 3600 * 1000,
-        '7 days': 7 * 24 * 3600 * 1000
-      };
-      return new Date(now - (map[lookbackStr] || 24 * 3600 * 1000)).toISOString();
+      return new Date(now - lookbackToMs(lookbackStr)).toISOString();
     }
 
     async function loadCurrentView() {
@@ -803,42 +867,223 @@ function createAWeightingChain(ctx) {
 
     document.getElementById('mode-live-btn').addEventListener('click', () => {
       viewMode = 'live';
+      activeCustom6h = false
       setActiveModeButtons();
       loadCurrentView();
+      renderQuerystring();
     });
 
     document.getElementById('mode-1m-btn').addEventListener('click', () => {
       viewMode = '1m';
       setActiveModeButtons();
-      loadCurrentView();
+      loadCustom6h1mRollup();
     });
 
     document.getElementById('mode-5m-btn').addEventListener('click', () => {
       viewMode = '5m';
       setActiveModeButtons();
-      loadCurrentView();
-    });
-
-    document.getElementById('mode-live-btn').addEventListener('click', () => {
-      if (viewMode !== 'live') {
-        setActiveModeButtons();
-        loadCurrentView();
-      }
-    });
-
-    document.getElementById('mode-live-btn').addEventListener('click', () => {
-      if (viewMode !== 'live') {
-        setActiveModeButtons();
-        loadCurrentView();
-      }
+      loadCustom6h1mRollup();
     });
 
     document.getElementById('refresh-view-btn').addEventListener('click', () => {
       if (viewMode !== 'live') {
         setActiveModeButtons();
-        loadCurrentView();
+        loadCustom6h1mRollup();
       }
     });
+
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    let activeCustom6h = false;
+
+    function toDatetimeLocalValue(dateObj) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${dateObj.getFullYear()}-${pad(dateObj.getMonth() + 1)}-${pad(dateObj.getDate())}T${pad(dateObj.getHours())}:${pad(dateObj.getMinutes())}`;
+    }
+
+    function updateWindowRangeLabel(startDate) {
+      const endDate = new Date(startDate.getTime() + SIX_HOURS_MS);
+      const labelEl = document.getElementById('window-range-label');
+      if (!labelEl) return;
+
+      const opts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+      labelEl.textContent = `${startDate.toLocaleString([], opts)} → ${endDate.toLocaleString([], opts)}`;
+    }
+
+    function getSelected6hStartDate() {
+      const input = document.getElementById('window-start-input');
+      let startDate = input.value ? new Date(input.value) : new Date(Date.now() - SIX_HOURS_MS);
+
+      if (Number.isNaN(startDate.getTime())) {
+        startDate = new Date(Date.now() - SIX_HOURS_MS);
+      }
+
+      updateWindowRangeLabel(startDate);
+      return startDate;
+    }
+
+    async function loadCustom6h1mRollup() {
+      const lookback = document.getElementById('lookback-select');
+      const startDate = getSelected6hStartDate();
+      const endDate = new Date(startDate.getTime() + lookbackToMs(lookback.value));
+
+      activeCustom6h = true;
+      if (viewMode === 'live') {
+        viewMode = '1m';
+      }
+      setActiveModeButtons();
+
+      const summaryEl = document.getElementById('events-summary');
+      if (summaryEl) summaryEl.textContent = 'Loading 6h (' + viewMode + ') rollup...';
+
+      const bucketInterval = viewMode == '1m' ? '1 minute' : '5 minutes';
+
+      const { data, error } = await db.rpc('get_spl_rollups', {
+        p_bucket_interval: bucketInterval,
+        p_since: startDate.toISOString(),
+        p_until: endDate.toISOString()
+      });
+
+      if (error) {
+        if (summaryEl) summaryEl.textContent = 'Rollup error: ' + error.message;
+        return;
+      }
+
+      currentPoints = (data || []).map((row) => ({
+        ts: row.bucket_start,
+        dba: Number(row.dba_leq),
+        dbc: Number(row.dbc_leq),
+        peak: Number(row.peak_dbc_max ?? row.dbc_leq)
+      }));
+
+      renderSeriesToChart(currentPoints, false);
+      renderEventsList(detectLevelChanges(currentPoints));
+      renderQuerystring();
+    }
+
+    function init6hWindowControls() {
+      const timeMap = {
+        '1 hour': '1h',
+        '3 hours': '3h',
+        '6 hours': '6h',
+        '12 hours': '12h',
+        '24 hours': '24h',
+        '7 days': '7d'
+      };
+      const queryStringTimeMap = new Map(Array.from(timeMap, ([key, value]) => [value, key]));
+      const params = new URLSearchParams(window.location.search);
+      const qRollupInterval = params.get('rollupInterval');
+      const qRollupWindow = params.get('rollupWindow');
+      const qRollupStart = params.get('rollupStart');
+
+      const lookback = document.getElementById('lookback-select');
+      const input = document.getElementById('window-start-input');
+      const backBtn = document.getElementById('shift-back-6h-btn');
+      const fwdBtn = document.getElementById('shift-fwd-6h-btn');
+      const loadBtn = document.getElementById('load-6h-btn');
+      const lookbackSelect = document.getElementById('lookback-select');
+
+      if (!input || !backBtn || !fwdBtn || !loadBtn) return;
+
+      // If set, set querystring interval, then window, then start
+      if (qRollupInterval) {
+        switch (qRollupInterval){
+        case '1m':
+          viewMode = '1m';
+          break;
+        case '5m':
+          viewMode = '5m';
+          break;
+        default:
+          viewMode = 'live';
+          break;
+        }
+
+        if (viewMode !== 'live') {
+
+          if (qRollupWindow) {
+            const normalizedTarget = qRollupWindow.trim();
+            const match = Array.from(lookback.options).find(
+              (option) => option.textContent.trim() === normalizedTarget
+            );
+            if (match) {
+              lookback.value = match.value;
+            }
+          }
+        }
+      } else {
+        // if not set, ignore all other values and assume defaults
+      }
+
+      function formatLocalDateTime(date) {
+        const pad = (n) => String(n).padStart(2, "0");
+        const datePart = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+        const timePart = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        return `${datePart}T${timePart}`;
+      }
+
+      function createStartDate() {
+         return new Date(Date.now() - lookbackToMs(lookback.value));
+      }
+
+      let activeStartDate = createStartDate();
+      input.value = toDatetimeLocalValue(activeStartDate);
+      
+      if (qRollupWindow && viewMode !== 'live' && qRollupStart) {
+        const parsed = new Date(Number(qRollupStart));
+        if (!Number.isNaN(parsed.getTime())) {
+          activeStartDate = parsed;
+          input.value = formatLocalDateTime(activeStartDate);
+        } 
+        loadCustom6h1mRollup();
+      }
+      updateWindowRangeLabel(activeStartDate);
+
+      input.addEventListener('change', () => {
+        getSelected6hStartDate();
+        if (activeCustom6h) {
+          loadCustom6h1mRollup();
+        }
+      });
+
+      lookbackSelect.addEventListener('change', () => {
+        backBtn.textContent = '-' + timeMap[lookback.value];
+        fwdBtn.textContent = '+' + timeMap[lookback.value];
+      });
+
+      backBtn.addEventListener('click', () => {
+        const currentStart = getSelected6hStartDate();
+        const nextStart = new Date(currentStart.getTime() - lookbackToMs(lookback.value));
+        input.value = toDatetimeLocalValue(nextStart);
+        loadCustom6h1mRollup();
+      });
+
+      fwdBtn.addEventListener('click', () => {
+        const currentStart = getSelected6hStartDate();
+        const nextStart = new Date(currentStart.getTime() + lookbackToMs(lookback.value));
+        input.value = toDatetimeLocalValue(nextStart);
+        loadCustom6h1mRollup();
+      });
+
+      loadBtn.addEventListener('click', () => {
+        // reset lookback values and display
+        const select = document.getElementById("mySelect");
+
+        // Restore whichever <option> had the `selected` attribute in HTML
+        for (const option of lookback.options) {
+          option.selected = option.defaultSelected;
+        }
+        const initialStart = createStartDate();
+        input.value = toDatetimeLocalValue(initialStart);
+        updateWindowRangeLabel(initialStart);
+        viewMode = '1m';
+        loadCustom6h1mRollup();
+      });
+
+      // call lookback select change listener
+      lookbackSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    init6hWindowControls();
 
     </script>
   </body>
