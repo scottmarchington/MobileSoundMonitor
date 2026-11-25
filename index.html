@@ -684,7 +684,7 @@ function createAWeightingChain(ctx) {
           const dbcOffset = calibrationOffset + dbcTrim;
           const bandsSpl = {};
           for (let b = 0; b < bandRanges.length; b++) {
-            const meanPower = bandPowerSums[b] / validSampleCount;
+            const meanPower = bandPowerSums[b] / sampleCount;
             const dbfs = 10 * Math.log10(Math.max(meanPower, 1e-14));
             bandsSpl[bandRanges[b].label] = Number(Math.max(0, dbfs + dbcOffset).toFixed(1));
           }
